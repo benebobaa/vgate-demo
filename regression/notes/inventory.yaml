@@ -33,10 +33,10 @@ operations:
     responses: { '200': [] }
     scenarios:
       - id: HLT-200
-        title: answers UP without a key
+        title: answers UP and the API version without a key
         as: anonymous
-        expect: { status: 200, response: [status is UP] }
-        sources: [openapi.yaml health (security none)]
+        expect: { status: 200, response: [status is UP, version is "1"] }
+        sources: [openapi.yaml health (security none), openapi.yaml Health.version]
 
   - id: listNotes
     operation: GET /notes
