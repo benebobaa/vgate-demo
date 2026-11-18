@@ -192,7 +192,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const method = req.method ?? 'GET';
   if (url.pathname === '/health') {
     if (method !== 'GET') return send(res, 405, undefined, { Allow: 'GET' });
-    return send(res, 200, { status: 'UP' });
+    return send(res, 200, { status: 'UP', version: '1' });
   }
 
   // Rule 9: the console session, cookie-authenticated (no API key).

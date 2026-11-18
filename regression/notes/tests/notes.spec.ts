@@ -13,9 +13,9 @@ async function create(caller: Caller<paths>, input: NoteInput): Promise<Note> {
 }
 
 test.describe('GET /health', () => {
-  test('[HLT-200] answers UP without a key', async ({ api }) => {
+  test('[HLT-200] answers UP and the API version without a key', async ({ api }) => {
     const res = await api.anonymous().get('/health');
-    expect(res.expectSuccess()).toEqual({ status: 'UP' });
+    expect(res.expectSuccess()).toEqual({ status: 'UP', version: '1' });
   });
 });
 

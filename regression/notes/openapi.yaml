@@ -265,6 +265,7 @@ components:
       required: [status]
       properties:
         status: { type: string, enum: [UP] }
+        version: { type: string, description: The running API version, e.g. "1" }
     Tag:
       type: string
       pattern: '^[a-z0-9-]{1,20}$'
