@@ -264,7 +264,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const { limit, tags } = listQuery(url);
     const matching = [...notes.values()]
       .filter((note) => tags.every((tag) => note.tags.includes(tag)))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return send(res, 200, { items: matching.slice(0, limit), total: matching.length });
   }
 
