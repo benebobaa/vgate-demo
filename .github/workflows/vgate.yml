@@ -165,14 +165,23 @@ jobs:
         if: always()
         working-directory: ${{ env.VGATE_PROJECT_DIR }}
         run: vgate down --service "$SERVICE" || true
+      - name: Migrations
+        # Safe to deploy next to what runs: lint, apply, round trip, the deployed code on the new schema. A service
+        # without `migrate:` answers "not configured" at once. Only on changes, which have a base to compare with.
+        if: always() && needs.plan.outputs.base != ''
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        env:
+          BASE: ${{ needs.plan.outputs.base }}
+        run: vgate migrations --service "$SERVICE" --base "$BASE"
       - name: Collect the evidence
         if: always()
         working-directory: ${{ env.VGATE_PROJECT_DIR }}
         run: |
-          # Only the verdict travels to the decision; a missing verdict is a missing proof, and decide blocks on it.
+          # Only vgate's own answers travel to the decision; a missing one is a missing proof, and decide blocks on it.
           mkdir -p "$RUNNER_TEMP/evidence/$SERVICE"
           cp "$VGATE_REPORTS_DIR/verdict.json" "$RUNNER_TEMP/evidence/$SERVICE/verdict.json" 2>/dev/null \
             || echo "::warning::no verdict for $SERVICE: the gate did not finish"
+          cp "$VGATE_REPORTS_DIR/migrations.json" "$RUNNER_TEMP/evidence/$SERVICE/migrations.json" 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         if: always()
         with:
