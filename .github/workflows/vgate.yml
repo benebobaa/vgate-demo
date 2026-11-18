@@ -35,7 +35,7 @@ env:
   VGATE_REPORTS_DIR: reports
   VGATE_BASE_URL: https://vgate.benelabs.tech
   # Turn on GitHub auto-merge for pull requests vgate decides `merge` (needs "Allow auto-merge" in the settings).
-  VGATE_AUTOMERGE: 'false'
+  VGATE_AUTOMERGE: 'true'
   VGATE_MERGE_METHOD: squash
 
 defaults:
