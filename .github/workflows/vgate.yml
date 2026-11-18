@@ -140,6 +140,15 @@ jobs:
         with:
           path: ~/.cache/vgate
           key: vgate-${{ needs.plan.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      # The tools the gate drives: Node and pnpm run the tests (pnpm comes from Node's corepack, pinned by the vgate
+      # runtime itself), uv runs Schemathesis. A fresh runner has none of them set up.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Tools for the gate
+        run: |
+          corepack enable pnpm
+          pipx install uv
       - name: Doctor
         working-directory: ${{ env.VGATE_PROJECT_DIR }}
         run: |
