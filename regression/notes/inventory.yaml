@@ -79,6 +79,11 @@ operations:
         as: anonymous
         expect: { status: 401, headers: [WWW-Authenticate ApiKey] }
         sources: [README.md rule 1]
+      - id: LST-401-BUILTIN
+        title: refuses keys named like built-in object properties (constructor, __proto__, toString, hasOwnProperty)
+        as: each such key
+        expect: { status: 401 }
+        sources: [README.md rule 1 (an unknown key)]
 
   - id: createNote
     operation: POST /notes
