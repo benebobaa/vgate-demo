@@ -21,13 +21,15 @@ interface Note {
 type ErrorKind = 'bad_request' | 'unauthorized' | 'forbidden' | 'not_found';
 
 const port = Number(process.env.EXAMPLE_PORT ?? 8090);
-const keys: Record<string, 'writer' | 'reader'> = {
-  [process.env.EXAMPLE_WRITER_KEY ?? 'writer-key']: 'writer',
-  [process.env.EXAMPLE_READER_KEY ?? 'reader-key']: 'reader',
-};
+// A Map, not an object literal: on a plain object a lookup of "constructor" or "__proto__" finds a built-in property,
+// so a key named after one would have authenticated.
+const keys = new Map<string, 'writer' | 'reader'>([
+  [process.env.EXAMPLE_WRITER_KEY ?? 'writer-key', 'writer'],
+  [process.env.EXAMPLE_READER_KEY ?? 'reader-key', 'reader'],
+]);
 const notes = new Map<string, Note>();
 // Rule 9: console accounts that log in with a password and get a session cookie.
-const accounts: Record<string, string> = { alice: process.env.EXAMPLE_ALICE_PASSWORD ?? 'alice-pass' };
+const accounts = new Map<string, string>([['alice', process.env.EXAMPLE_ALICE_PASSWORD ?? 'alice-pass']]);
 const sessions = new Map<string, { username: string; csrf: string }>();
 const SESSION_COOKIE = 'example_session';
 // Rule 11: the payment provider's signing secret, and how old a delivery may be.
@@ -120,7 +122,7 @@ function login(raw: unknown): string {
   const { username, password } = input;
   if (typeof username !== 'string' || typeof password !== 'string' || Object.keys(input).length !== 2)
     throw new Reject(400, 'bad_request', 'username and password are required, nothing else');
-  if (accounts[username] === undefined || accounts[username] !== password)
+  if (accounts.get(username) === undefined || accounts.get(username) !== password)
     throw new Unauthenticated('unknown username or wrong password', 'Session');
   return username;
 }
@@ -238,7 +240,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const words = /^\/notes\/([^/]+)\/words$/.exec(url.pathname);
   if (words) {
     if (method !== 'GET') return send(res, 405, undefined, { Allow: 'GET' });
-    if (!keys[String(req.headers['x-api-key'] ?? '')])
+    if (!keys.get(String(req.headers['x-api-key'] ?? '')))
       throw new Unauthenticated('a valid X-Api-Key is required', 'ApiKey');
     return streamWords(res, find(decodeURIComponent(words[1])));
   }
@@ -249,7 +251,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (!allowed.includes(method)) return send(res, 405, undefined, { Allow: allowed.join(', ') });
 
   // Rule 1 and 2: the key first, then what it may do, then the request itself.
-  const role = keys[String(req.headers['x-api-key'] ?? '')];
+  const role = keys.get(String(req.headers['x-api-key'] ?? ''));
   if (!role) throw new Unauthenticated('a valid X-Api-Key is required', 'ApiKey');
   if (method !== 'GET' && role !== 'writer') throw new Reject(403, 'forbidden', 'this key may only read');
 

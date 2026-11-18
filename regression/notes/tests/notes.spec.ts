@@ -122,6 +122,14 @@ test.describe('GET /notes', () => {
   test('[LST-401] refuses a call without a key (rule 1)', async ({ api }) => {
     expect((await api.anonymous().get('/notes')).expectError(401)).toMatchObject({ error: 'unauthorized' });
   });
+
+  test('[LST-401-BUILTIN] refuses keys named like built-in object properties (rule 1: an unknown key)', async ({
+    api,
+  }) => {
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect((await api.asToken(key).get('/notes')).expectError(401), key).toMatchObject({ error: 'unauthorized' });
+    }
+  });
 });
 
 test.describe('GET /notes/{noteId}', () => {
