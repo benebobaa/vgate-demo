@@ -1,0 +1,52 @@
+# notes: the demo service. Its code is app/server.ts; its spec is README.md and openapi.yaml here.
+name: notes
+
+spec: openapi.yaml
+
+rules:
+  datetimeOffset: Z # README rule 7: every datetime is UTC
+  strictResponseProperties: true
+  headers:
+    always:
+      X-Request-Id: '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/' # README rule 7
+    withBody:
+      Content-Type: '/^(application\/json|text\/event-stream)$/' # README rules 7 and 10: JSON, or a stream
+    onStatus:
+      '401':
+        WWW-Authenticate: '/^(ApiKey|Session)$/' # README rules 1 and 9: the challenge names what was missing
+  streaming: # README rule 10
+    terminal:
+      - data: '[DONE]'
+    eventTimeoutMs: 5000
+
+schemathesis:
+  readOnlyMethods: [GET] # a REST service: reads are the GETs
+  users: [reader, writer, alice] # alice: a session cookie, no API key
+  maxExamples: 25
+
+environments:
+  local:
+    disposable: true # in-memory; `task reset` restarts it empty
+    baseUrl: http://localhost:${EXAMPLE_PORT:-8090}
+    healthPath: /health
+    auth:
+      header: X-Api-Key # README rule 1: a static API key, no identity provider
+      scheme: ''
+      session: # README rule 9: console accounts log in and send the cookie and the CSRF token
+        login: { path: /session, body: { username: '{username}', password: '{password}' } }
+        cookie: example_session
+        csrf: { field: csrfToken, header: X-CSRF-Token }
+    users:
+      writer: { token: '${EXAMPLE_WRITER_KEY:-writer-key}', role: writer }
+      reader: { token: '${EXAMPLE_READER_KEY:-reader-key}', role: reader }
+      alice: { password: '${EXAMPLE_ALICE_PASSWORD:-alice-pass}', role: console account }
+    webhooks:
+      notes: # README rule 11
+        path: /webhooks/notes
+        secret: '${EXAMPLE_WEBHOOK_SECRET:-whsec-example}'
+        header: X-Example-Signature
+        payload: '{timestamp}.{body}'
+        format: 't={timestamp},v1={signature}'
+
+# The repository paths whose change can affect this service.
+paths: [app/**]

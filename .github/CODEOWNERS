@@ -1,0 +1,4 @@
+# The judge: changes to how pull requests are verified need the owner's review.
+/vgate.yaml                          @benebobaa
+/.github/                            @benebobaa
+/regression/**/known-failures.yaml   @benebobaa

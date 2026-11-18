@@ -1,0 +1,7 @@
+# A vgate project: the judge is pinned, so every machine and CI give the same verdict.
+version: 0.2.0
+servicesDir: regression
+
+# A pull request whose risk is low merges by itself when vgate verifies it; anything riskier waits for a person.
+policy:
+  autoMerge: low

@@ -1,0 +1,8 @@
+# Merge into .github/CODEOWNERS and turn on "Require review from Code Owners" for the protected branch.
+# These files are the judge: a pull request runs its own copy of the workflow, so a change to any of them needs a
+# human before the checks it produces can be trusted. Replace the team with the people who own verification.
+# Every workflow, not only vgate.yml: a new workflow runs on the pull request too, and can report a check of its own.
+/.github/workflows/           @your-org/verification-owners
+/.github/CODEOWNERS           @your-org/verification-owners
+/vgate.yaml                   @your-org/verification-owners
+**/known-failures.yaml        @your-org/verification-owners

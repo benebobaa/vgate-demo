@@ -1,0 +1,352 @@
+# Test plan of the notes service: a REST service with an API key, a console session, a stream and a signed webhook.
+service: notes
+contract: openapi.yaml
+backend: { repo: ., commit: none } # the service lives in this repo (server.ts)
+
+sources:
+  - openapi.yaml
+  - README.md
+
+personas:
+  writer: { kind: seeded, role: writer }
+  reader: { kind: seeded, role: reader }
+  anonymous: { kind: none, state: no X-Api-Key }
+  alice: { kind: seeded, role: console account, state: session cookie through service.yaml auth.session }
+  provider: { kind: webhook, state: signs deliveries as service.yaml webhooks.notes says }
+
+auth:
+  scenarios: [] # per operation below: every operation but /health has a 401 scenario (README rule 1)
+
+conventions:
+  rules:
+    - rule: every response carries a UUID X-Request-Id, a JSON body where there is one, UTC datetimes
+      sources: [README.md rule 7]
+      checkedBy: framework client on every call (service.yaml rules)
+    - rule: the key is checked first (401), then the write permission (403), then the request (400), then the note (404)
+      sources: [README.md rules 1, 2, 4]
+
+operations:
+  - id: health
+    operation: GET /health
+    area: HLT
+    permission: null
+    responses: { '200': [] }
+    scenarios:
+      - id: HLT-200
+        title: answers UP without a key
+        as: anonymous
+        expect: { status: 200, response: [status is UP] }
+        sources: [openapi.yaml health (security none)]
+
+  - id: listNotes
+    operation: GET /notes
+    area: LST
+    permission: reader or writer
+    rules:
+      - rule: limit is an integer from 1 to 100, default 20; tag matches ^[a-z0-9-]{1,20}$
+        sources: [openapi.yaml listNotes parameters]
+      - rule: newest first; every given tag must be carried; total counts before the limit
+        sources: [README.md rule 6]
+    responses: { '200': [], '400': [], '401': [] }
+    scenarios:
+      - id: LST-200
+        title: lists the matching notes newest first, with their total
+        as: reader
+        expect: { status: 200, response: [items newest first, total 2] }
+        sources: [README.md rule 6]
+      - id: LST-200-LIMIT
+        title: returns at most limit notes; total counts them all
+        as: reader
+        expect: { status: 200, response: [2 items of 3, total 3] }
+        sources: [README.md rule 6, openapi.yaml NotePage.total]
+      - id: LST-200-TAGS
+        title: with several tags, only notes carrying every one
+        as: reader
+        expect: { status: 200 }
+        sources: [README.md rule 6]
+      - id: LST-400-LIMIT
+        title: refuses limit 0, 101 and a non-integer
+        as: reader
+        expect: { status: 400, response: [error bad_request] }
+        sources: [openapi.yaml listNotes limit, README.md rule 3]
+      - id: LST-400-TAG
+        title: refuses a tag outside the pattern
+        as: reader
+        expect: { status: 400 }
+        sources: [openapi.yaml Tag, README.md rule 3]
+      - id: LST-401
+        title: refuses a call without a key
+        as: anonymous
+        expect: { status: 401, headers: [WWW-Authenticate ApiKey] }
+        sources: [README.md rule 1]
+
+  - id: createNote
+    operation: POST /notes
+    area: CRT
+    permission: writer
+    request: NoteInput
+    checkOrder: [key (401), write permission (403), body (400)]
+    responses: { '201': [], '400': [], '401': [], '403': [] }
+    scenarios:
+      - id: CRT-201
+        title: creates a note with a fresh id and equal timestamps
+        as: writer
+        expect:
+          { status: 201, response: [id is a UUID, createdAt equals updatedAt], state: [GET answers the same note] }
+        sources: [README.md rule 5]
+      - id: CRT-201-DEFAULTS
+        title: stores an omitted body as null and omitted tags as []
+        as: writer
+        expect: { status: 201 }
+        sources: [README.md rule 5]
+      - id: CRT-400
+        title: refuses a body that breaks NoteInput (table of cases) or is not JSON
+        as: writer
+        expect: { status: 400, response: [error bad_request] }
+        sources: [openapi.yaml NoteInput, README.md rule 3]
+      - id: CRT-400-CONTENT-TYPE
+        title: refuses a JSON body not sent as application/json
+        as: writer
+        expect: { status: 400 }
+        sources: [README.md rule 3]
+      - id: CRT-401
+        title: refuses a call without a key or with an unknown one
+        as: anonymous
+        expect: { status: 401 }
+        sources: [README.md rule 1]
+      - id: CRT-403
+        title: refuses a reader and creates nothing
+        as: reader
+        expect: { status: 403, state: [no note with the tag] }
+        sources: [README.md rule 2]
+      - id: CRT-403-BEFORE-400
+        title: checks the key before the body
+        as: reader
+        expect: { status: 403 }
+        sources: [README.md rule 2]
+
+  - id: getNote
+    operation: GET /notes/{noteId}
+    area: GET
+    permission: reader or writer
+    responses: { '200': [], '401': [], '404': [] }
+    scenarios:
+      - id: GET-200
+        title: answers the note
+        as: reader
+        expect: { status: 200 }
+        sources: [openapi.yaml getNote]
+      - id: GET-401
+        title: refuses a call without a key, before looking the note up
+        as: anonymous
+        expect: { status: 401 }
+        sources: [README.md rule 1]
+      - id: GET-404
+        title: answers not_found for an unknown id
+        as: reader
+        expect: { status: 404 }
+        sources: [openapi.yaml getNote 404]
+
+  - id: replaceNote
+    operation: PUT /notes/{noteId}
+    area: PUT
+    permission: writer
+    request: NoteInput
+    checkOrder: [key (401), write permission (403), body (400), note (404)]
+    responses: { '200': [], '400': [], '401': [], '403': [], '404': [] }
+    scenarios:
+      - id: PUT-200
+        title: replaces title, body and tags, keeps createdAt, moves updatedAt
+        as: writer
+        expect: { status: 200 }
+        sources: [README.md rule 5]
+      - id: PUT-400
+        title: refuses an invalid body and changes nothing
+        as: writer
+        expect: { status: 400, state: [the note unchanged] }
+        sources: [README.md rule 3]
+      - id: PUT-400-BEFORE-404
+        title: validates the body before looking the note up
+        as: writer
+        expect: { status: 400 }
+        sources: [README.md rule 4]
+      - id: PUT-401
+        title: refuses a call without a key
+        as: anonymous
+        expect: { status: 401 }
+        sources: [README.md rule 1]
+      - id: PUT-403
+        title: refuses a reader and changes nothing
+        as: reader
+        expect: { status: 403, state: [the note unchanged] }
+        sources: [README.md rule 2]
+      - id: PUT-404
+        title: answers not_found for an unknown id with a valid body
+        as: writer
+        expect: { status: 404 }
+        sources: [openapi.yaml replaceNote 404]
+
+  - id: deleteNote
+    operation: DELETE /notes/{noteId}
+    area: DEL
+    permission: writer
+    responses: { '204': [], '401': [], '403': [], '404': [] }
+    scenarios:
+      - id: DEL-204
+        title: deletes the note; it is gone afterwards
+        as: writer
+        expect: { status: 204, state: [GET answers 404] }
+        sources: [openapi.yaml deleteNote]
+      - id: DEL-401
+        title: refuses a call without a key
+        as: anonymous
+        expect: { status: 401 }
+        sources: [README.md rule 1]
+      - id: DEL-403
+        title: refuses a reader; the note stays
+        as: reader
+        expect: { status: 403, state: [the note still readable] }
+        sources: [README.md rule 2]
+      - id: DEL-404
+        title: answers not_found for an unknown id
+        as: writer
+        expect: { status: 404 }
+        sources: [openapi.yaml deleteNote 404]
+
+  - id: login
+    operation: POST /session
+    area: SES
+    permission: null
+    rules:
+      - rule: exactly username and password; a wrong password is 401 Session; success sets example_session and returns csrfToken
+        sources: [README.md rule 9]
+    responses: { '200': [], '400': [], '401': [] }
+    scenarios:
+      - id: SES-200
+        title: logs an account in, sets the session cookie, returns a CSRF token
+        as: anonymous
+        expect: { status: 200, response: [username alice, csrfToken], headers: [Set-Cookie example_session HttpOnly] }
+        sources: [README.md rule 9, openapi.yaml login]
+      - id: SES-400
+        title: refuses a body that is not exactly username and password
+        as: anonymous
+        expect: { status: 400 }
+        sources: [README.md rule 9, openapi.yaml LoginRequest]
+      - id: SES-401
+        title: refuses a wrong password and sets no cookie
+        as: anonymous
+        expect: { status: 401, headers: [WWW-Authenticate Session, no Set-Cookie] }
+        sources: [README.md rule 9]
+
+  - id: me
+    operation: GET /me
+    area: ME
+    permission: session
+    responses: { '200': [], '401': [] }
+    scenarios:
+      - id: ME-200
+        title: answers the account of the session
+        as: alice
+        expect: { status: 200, response: [username alice] }
+        sources: [README.md rule 9]
+      - id: ME-401
+        title: refuses a call without a session, an API key included
+        as: [anonymous, reader]
+        expect: { status: 401, headers: [WWW-Authenticate Session] }
+        sources: [README.md rule 9]
+
+  - id: logout
+    operation: DELETE /session
+    area: OUT
+    permission: session + X-CSRF-Token
+    responses: { '204': [], '401': [], '403': [] }
+    scenarios:
+      - id: OUT-204
+        title: logs out; the session no longer works
+        as: alice (own session)
+        expect: { status: 204, state: [GET /me answers 401 with that cookie] }
+        sources: [README.md rule 9]
+      - id: OUT-401
+        title: refuses a call without a session
+        as: anonymous
+        expect: { status: 401 }
+        sources: [README.md rule 9]
+      - id: OUT-403
+        title: refuses a logout without the CSRF token; the session keeps working
+        as: alice (cookie only, then a wrong token)
+        expect: { status: 403, state: [GET /me still 200] }
+        sources: [README.md rule 9]
+
+  - id: streamWords
+    operation: GET /notes/{noteId}/words
+    area: WRD
+    permission: reader or writer
+    rules:
+      - rule: one word event per word of title then body ({ index, word }, id = index), then data [DONE]
+        sources: [README.md rule 10]
+      - rule: every event is held to x-vgate-events; a stream without [DONE] fails
+        checkedBy: framework client (service.yaml rules.streaming)
+    responses: { '200': [], '401': [], '404': [] }
+    scenarios:
+      - id: WRD-200
+        title: streams the words of title and body, then [DONE]
+        as: reader
+        expect: { status: 200, response: [4 word events in order, ids 0-3, [DONE]] }
+        sources: [README.md rule 10]
+      - id: WRD-401
+        title: refuses a call without a key, as JSON, before the lookup
+        as: anonymous
+        expect: { status: 401, headers: [WWW-Authenticate ApiKey] }
+        sources: [README.md rule 10, README.md rule 1]
+      - id: WRD-404
+        title: answers not_found as JSON for an unknown note
+        as: reader
+        expect: { status: 404 }
+        sources: [README.md rule 10]
+
+  - id: receiveNoteWebhook
+    operation: POST /webhooks/notes
+    area: WHK
+    permission: a valid provider signature
+    rules:
+      - rule: X-Example-Signature t=..,v1=hex HMAC-SHA256 of "t.body", at most 300 s old; signature, then body, then note
+        sources: [README.md rule 11, openapi.yaml receiveNoteWebhook]
+    responses: { '204': [], '400': [], '403': [], '404': [] }
+    scenarios:
+      - id: WHK-204
+        title: accepts a signed note.flagged delivery and flags the note
+        as: provider
+        expect: { status: 204, state: [note flagged true] }
+        sources: [README.md rule 11]
+      - id: WHK-403-OLD
+        title: refuses a delivery signed more than 300 seconds ago
+        as: provider
+        expect: { status: 403, state: [note not flagged] }
+        sources: [README.md rule 11]
+      - id: WHK-403-FORGED
+        title: refuses a delivery signed with another secret
+        as: provider
+        expect: { status: 403, state: [note not flagged] }
+        sources: [README.md rule 11]
+      - id: WHK-403-UNSIGNED
+        title: refuses a delivery without a signature
+        as: provider
+        expect: { status: 403, state: [note not flagged] }
+        sources: [README.md rule 11]
+      - id: WHK-403-TAMPERED
+        title: refuses a body changed after signing
+        as: provider
+        expect: { status: 403, state: [the other note not flagged] }
+        sources: [README.md rule 11]
+      - id: WHK-400
+        title: refuses a signed delivery of another event type
+        as: provider
+        expect: { status: 400, state: [note not flagged] }
+        sources: [README.md rule 11, openapi.yaml NoteWebhook]
+      - id: WHK-404
+        title: answers not_found for a signed delivery about an unknown note
+        as: provider
+        expect: { status: 404 }
+        sources: [README.md rule 11]
+
+openQuestions: []

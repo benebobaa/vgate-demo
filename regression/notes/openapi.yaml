@@ -1,0 +1,356 @@
+# The reference example of the framework: a small REST service (services/example/server.ts) that differs from
+# a typical enterprise backend on purpose - REST verbs, query and path parameters, an API key, no envelope, UTC datetimes - and that
+# also has a console session (cookie + CSRF), a Server-Sent Events stream and a signed webhook.
+openapi: 3.1.0
+info:
+  title: Notes API (framework example)
+  version: 1.0.0
+security:
+  - apiKey: []
+paths:
+  /health:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: The service is up
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /notes:
+    get:
+      operationId: listNotes
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: tag
+          in: query
+          description: Only notes carrying every given tag
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/Tag' }
+      responses:
+        '200':
+          description: The notes, newest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteInput'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /session:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Logged in; the session cookie is set (example_session, HttpOnly)
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/SessionRequired'
+    delete:
+      operationId: logout
+      security:
+        - session: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Logged out; the session no longer works
+        '401':
+          $ref: '#/components/responses/SessionRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /me:
+    get:
+      operationId: me
+      security:
+        - session: []
+      responses:
+        '200':
+          description: The account of the session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/SessionRequired'
+  /webhooks/notes:
+    post:
+      operationId: receiveNoteWebhook
+      description: >-
+        Called by the provider, signed instead of keyed: X-Example-Signature is t=<unix seconds>,v1=<hex HMAC-SHA256
+        of "<t>.<raw body>"> with the shared secret, at most 300 seconds old.
+      security: []
+      parameters:
+        - name: X-Example-Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteWebhook'
+      responses:
+        '204':
+          description: Accepted; the note is flagged
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: The signature is missing, wrong or too old
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /notes/{noteId}/words:
+    parameters:
+      - name: noteId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: streamWords
+      responses:
+        '200':
+          description: One `word` event per word of the title and the body, then `data` [DONE]
+          content:
+            text/event-stream:
+              # OpenAPI 3.2 sequential media: the schema of each event (docs/streaming.md). Schemathesis reads it too.
+              itemSchema:
+                $ref: '#/components/schemas/WordStreamEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /notes/{noteId}:
+    parameters:
+      - name: noteId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getNote
+      responses:
+        '200':
+          description: The note
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: replaceNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteInput'
+      responses:
+        '200':
+          description: The replaced note
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: deleteNote
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    session:
+      type: apiKey
+      in: cookie
+      name: example_session
+  responses:
+    BadRequest:
+      description: The request breaks the contract (a parameter or a body field)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: No API key, or an unknown one
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    SessionRequired:
+      description: No session cookie, an ended one, or a wrong login
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: The key may read but not write, or the session's CSRF token is missing
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No note with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [UP] }
+    Tag:
+      type: string
+      pattern: '^[a-z0-9-]{1,20}$'
+    NoteInput:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 80 }
+        body: { type: ['string', 'null'], maxLength: 2000 }
+        tags:
+          type: array
+          maxItems: 5
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/Tag' }
+    Note:
+      type: object
+      required: [id, title, body, tags, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: ['string', 'null'] }
+        tags:
+          type: array
+          items: { $ref: '#/components/schemas/Tag' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        flagged: { type: boolean, const: true, description: Present once a note.flagged webhook named the note }
+    NotePage:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Note' }
+        total: { type: integer, minimum: 0, description: Notes matching the filter, before the limit }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, writeOnly: true }
+    Session:
+      type: object
+      required: [username, csrfToken]
+      properties:
+        username: { type: string }
+        csrfToken: { type: string, description: Sent back as X-CSRF-Token on state-changing session calls }
+    Me:
+      type: object
+      required: [username]
+      properties:
+        username: { type: string }
+    WordStreamEvent:
+      oneOf:
+        - type: object
+          required: [event, id, data]
+          properties:
+            event: { const: word }
+            id: { type: string, pattern: '^\d+$' }
+            data:
+              type: string
+              contentMediaType: application/json
+              contentSchema: { $ref: '#/components/schemas/WordEvent' }
+        - type: object
+          description: The end of the stream
+          required: [data]
+          properties:
+            event: { const: message }
+            data: { const: '[DONE]' }
+    WordEvent:
+      type: object
+      required: [index, word]
+      properties:
+        index: { type: integer, minimum: 0 }
+        word: { type: string, minLength: 1 }
+    NoteWebhook:
+      type: object
+      required: [type, noteId]
+      properties:
+        type: { type: string, enum: [note.flagged] }
+        noteId: { type: string }
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string, enum: [bad_request, unauthorized, forbidden, not_found] }
+        message: { type: string }

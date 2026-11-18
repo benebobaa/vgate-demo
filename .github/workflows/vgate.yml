@@ -1,0 +1,395 @@
+# vgate on GitHub Actions: copied into a project's .github/workflows/ by `vgate init --ci github`.
+# What it decides and why: docs/pr-verification.md. Setup: docs/ci.md.
+#
+#   plan      the pinned vgate version, the merge base, the services this change affects (and deletes), its risk tier
+#   gate      per affected service: doctor --fix, up, gate, down -> evidence (verdict.json) and the full reports
+#   guard     per affected or deleted service: compares the expectations with the merge base -> evidence (guard.json)
+#   decide    reads all evidence: merge | needs-approval | blocked; one sticky comment on the pull request
+#   approval  only on needs-approval: waits in the protected environment `vgate-expectations` for a required reviewer
+#   verdict   THE check to require in branch protection
+#   automerge pull requests decided `merge`: turns on GitHub auto-merge (VGATE_AUTOMERGE, off by default)
+#
+# On a push to the default branch it gates every service and skips the decision.
+#
+# Security: this runs on pull_request, never pull_request_target. A pull request from a fork gets a read-only token,
+# so the comment and auto-merge steps skip with a notice and the verdict still stands. Every value that a pull request
+# controls (the version in vgate.yaml, service directory names) reaches a script through env, never inline.
+name: vgate
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vgate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Where vgate.yaml sits, relative to the repository root, and its reportsDir.
+  VGATE_PROJECT_DIR: .
+  VGATE_REPORTS_DIR: reports
+  VGATE_BASE_URL: https://vgate.benelabs.tech
+  # Turn on GitHub auto-merge for pull requests vgate decides `merge` (needs "Allow auto-merge" in the settings).
+  VGATE_AUTOMERGE: 'false'
+  VGATE_MERGE_METHOD: squash
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pin.outputs.version }}
+      base: ${{ steps.base.outputs.base }}
+      gate: ${{ steps.affected.outputs.gate }}
+      guard: ${{ steps.affected.outputs.guard }}
+      tier: ${{ steps.risk.outputs.tier }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: pin
+        name: Read the pinned vgate version
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: |
+          version=$(sed -n "s/^version:[[:space:]]*['\"]\{0,1\}\([0-9][0-9A-Za-z.-]*\).*/\1/p" vgate.yaml | head -1)
+          if [ -z "$version" ]; then echo "::error file=vgate.yaml::no 'version: x.y.z' in vgate.yaml"; exit 1; fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+      - name: Install vgate
+        env:
+          VGATE_VERSION: ${{ steps.pin.outputs.version }}
+        run: |
+          curl -fsSL "$VGATE_BASE_URL/install.sh" | VGATE_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - id: base
+        name: The merge base
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) base=$(git merge-base "$PR_BASE" HEAD) ;;
+            merge_group) base=$QUEUE_BASE ;;
+            *) base= ;;
+          esac
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "Base: ${base:-none (gate every service)}"
+      - id: affected
+        name: The services to gate and to guard
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          if [ -z "$BASE" ]; then
+            gate=$(vgate services --json | jq -c '.data.services')
+            guard='[]'
+          else
+            # Outside the checkout: an untracked file there would count as part of the change.
+            vgate affected --base "$BASE" --json >"$RUNNER_TEMP/affected.json"
+            gate=$(jq -c '[.data.services[].name]' "$RUNNER_TEMP/affected.json")
+            guard=$(jq -c '[.data.services[].name] + (.data.deleted // []) | unique' "$RUNNER_TEMP/affected.json")
+            jq -r '"Changed files: \(.data.changedFiles | length)"' "$RUNNER_TEMP/affected.json"
+          fi
+          # A service's name becomes a job and artifact name: refuse anything but a plain directory name.
+          jq -ne --argjson a "$gate" --argjson b "$guard" '$a + $b | all(.[]; test("^[A-Za-z0-9._-]+$"))' >/dev/null \
+            || { echo "::error::a service name is not a plain directory name"; exit 1; }
+          echo "gate=$gate" >>"$GITHUB_OUTPUT"
+          echo "guard=$guard" >>"$GITHUB_OUTPUT"
+          echo "Gate: $gate  Guard: $guard" | tee -a "$GITHUB_STEP_SUMMARY"
+      - id: risk
+        name: Risk tier
+        if: steps.base.outputs.base != ''
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          vgate risk --base "$BASE" --json >"$RUNNER_TEMP/risk.json"
+          tier=$(jq -r '.data.tier' "$RUNNER_TEMP/risk.json")
+          echo "tier=$tier" >>"$GITHUB_OUTPUT"
+          jq -r '"Risk: \(.data.tier)", (.data.matches[]? | "- \(.file // .path // "") \(.reason // "")")' \
+            "$RUNNER_TEMP/risk.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  gate:
+    needs: plan
+    if: needs.plan.outputs.gate != '[]' && needs.plan.outputs.gate != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.plan.outputs.gate) }}
+    env:
+      SERVICE: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install vgate
+        env:
+          VGATE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          curl -fsSL "$VGATE_BASE_URL/install.sh" | VGATE_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/vgate
+          key: vgate-${{ needs.plan.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Doctor
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: |
+          # A pull request can commit a reports/verdict.json: it must never be collected as this run's evidence.
+          rm -rf "$VGATE_REPORTS_DIR"
+          vgate doctor --service "$SERVICE" --fix
+      - name: Start the stack
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: vgate up --service "$SERVICE"
+      - name: Gate
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: vgate gate --service "$SERVICE"
+      - name: Stop the stack
+        if: always()
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: vgate down --service "$SERVICE" || true
+      - name: Collect the evidence
+        if: always()
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: |
+          # Only the verdict travels to the decision; a missing verdict is a missing proof, and decide blocks on it.
+          mkdir -p "$RUNNER_TEMP/evidence/$SERVICE"
+          cp "$VGATE_REPORTS_DIR/verdict.json" "$RUNNER_TEMP/evidence/$SERVICE/verdict.json" 2>/dev/null \
+            || echo "::warning::no verdict for $SERVICE: the gate did not finish"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: vgate-evidence-gate-${{ matrix.service }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 14
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: vgate-reports-${{ matrix.service }}
+          path: ${{ env.VGATE_PROJECT_DIR }}/${{ env.VGATE_REPORTS_DIR }}/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  guard:
+    needs: plan
+    if: needs.plan.outputs.base != '' && needs.plan.outputs.guard != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.plan.outputs.guard) }}
+    env:
+      SERVICE: ${{ matrix.service }}
+      BASE: ${{ needs.plan.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The guard reads the base's files from git: it needs the history down to the merge base.
+          fetch-depth: 0
+      - name: Install vgate
+        env:
+          VGATE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          curl -fsSL "$VGATE_BASE_URL/install.sh" | VGATE_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - name: Guard the expectations
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: |
+          # A pull request can commit a reports/guard.json: only the guard's own answer becomes evidence.
+          rm -rf "$VGATE_REPORTS_DIR"
+          set +e
+          vgate guard --service "$SERVICE" --base "$BASE"
+          code=$?
+          set -e
+          # 0 auto, 1 needs-human: both are answers, and decide weighs them. Anything else is no answer.
+          case $code in 0 | 1) ;; *) echo "::error::vgate guard could not judge $SERVICE (exit $code)"; exit "$code" ;; esac
+          mkdir -p "$RUNNER_TEMP/evidence/$SERVICE"
+          cp "$VGATE_REPORTS_DIR/guard.json" "$RUNNER_TEMP/evidence/$SERVICE/guard.json" ||
+            echo "::warning::no guard.json for $SERVICE: decide counts the guard as not run"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: vgate-evidence-guard-${{ matrix.service }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  decide:
+    needs: [plan, gate, guard]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.base != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      decision: ${{ steps.decide.outputs.decision }}
+    env:
+      BASE: ${{ needs.plan.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install vgate
+        env:
+          VGATE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          curl -fsSL "$VGATE_BASE_URL/install.sh" | VGATE_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        # Nothing to download when no service was affected. decide recomputes what was affected and blocks on any
+        # missing evidence, so a failed download can only make the decision stricter.
+        continue-on-error: true
+        with:
+          pattern: vgate-evidence-*
+          path: ${{ runner.temp }}/evidence
+      - id: decide
+        name: Decide
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        env:
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          # The decision is read from vgate's own output, never from a file the pull request could have committed.
+          rm -rf "$VGATE_REPORTS_DIR"
+          set +e
+          vgate decide --base "$BASE" --evidence "$RUNNER_TEMP/evidence" --details-url "$DETAILS_URL" --json \
+            >"$RUNNER_TEMP/decide.json"
+          code=$?
+          set -e
+          decision=$(jq -r '.data.decision // empty' "$RUNNER_TEMP/decide.json" 2>/dev/null || true)
+          # merge is exit 0 and nothing else is: an answer that disagrees with its exit code is no answer.
+          if [ -z "$decision" ] || { [ "$decision" = merge ] && [ "$code" != 0 ]; }; then
+            echo "::error::vgate decide gave no usable decision (exit $code)"; cat "$RUNNER_TEMP/decide.json"
+            decision=blocked
+          fi
+          echo "decision=$decision" >>"$GITHUB_OUTPUT"
+          if [ -f "$VGATE_REPORTS_DIR/decision.md" ]; then cat "$VGATE_REPORTS_DIR/decision.md" >>"$GITHUB_STEP_SUMMARY"; fi
+          echo "vgate decision: $decision"
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          if [ "$FORK" = true ]; then
+            echo "::notice::A pull request from a fork gets a read-only token: no comment; the decision is in the job summary."
+            exit 0
+          fi
+          body="$VGATE_REPORTS_DIR/decision.md"
+          [ -f "$body" ] || { echo "::warning::no decision.md to post"; exit 0; }
+          # GitHub caps a comment at 65536 characters; the job summary and the reports keep the rest.
+          head -c 60000 "$body" >"$RUNNER_TEMP/comment.md"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '[.[] | select(.body | startswith("<!-- vgate:decision -->")) | .id] | first // empty' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F "body=@$RUNNER_TEMP/comment.md" >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F "body=@$RUNNER_TEMP/comment.md" >/dev/null
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: vgate-decision
+          path: |
+            ${{ env.VGATE_PROJECT_DIR }}/${{ env.VGATE_REPORTS_DIR }}/decision.json
+            ${{ env.VGATE_PROJECT_DIR }}/${{ env.VGATE_REPORTS_DIR }}/decision.md
+          retention-days: 90
+          if-no-files-found: ignore
+
+  approval:
+    needs: decide
+    if: needs.decide.outputs.decision == 'needs-approval'
+    runs-on: ubuntu-latest
+    # Settings > Environments > vgate-expectations: required reviewers (people, not the bot that opens the pull
+    # requests) and "Prevent self-review". The job waits here until one of them approves this run.
+    environment: vgate-expectations
+    permissions:
+      actions: read
+    steps:
+      - name: A reviewer approved this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # An environment without required reviewers (never created, or a plan that has none) lets this job start at
+          # once: only a recorded approval of this run counts, and never one by the pull request's author.
+          approvers=$(gh api "repos/$REPO/actions/runs/$RUN/approvals" | jq -r --arg author "$AUTHOR" '
+            [.[] | select(.state == "approved" and any(.environments[]; .name == "vgate-expectations"))
+              | .user.login | select(. != $author)] | unique | join(", ")')
+          if [ -z "$approvers" ]; then
+            echo "::error::no reviewer approved this run: give the environment vgate-expectations required reviewers (docs/ci.md)"
+            exit 1
+          fi
+          echo "Approved by $approvers after reading the decision (the comment and the decide job's summary)."
+
+  verdict:
+    needs: [plan, gate, decide, approval]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Combine
+        env:
+          EVENT: ${{ github.event_name }}
+          PLAN: ${{ needs.plan.result }}
+          GATE: ${{ needs.gate.result }}
+          DECIDE: ${{ needs.decide.result }}
+          DECISION: ${{ needs.decide.outputs.decision }}
+          APPROVAL: ${{ needs.approval.result }}
+        run: |
+          echo "event=$EVENT plan=$PLAN gate=$GATE decide=$DECIDE decision=${DECISION:--} approval=$APPROVAL"
+          [ "$PLAN" = success ] || { echo "::error::plan failed"; exit 1; }
+          if [ "$EVENT" = push ]; then
+            # The default branch: every service's gate. skipped means a project with no services yet.
+            case "$GATE" in success | skipped) echo "vgate: verified"; exit 0 ;; esac
+            echo "::error::the gate did not pass"; exit 1
+          fi
+          case "$DECISION" in
+            merge) echo "vgate: verified, may merge" ;;
+            needs-approval)
+              [ "$APPROVAL" = success ] || { echo "::error::needs a human approval of this run (environment vgate-expectations)"; exit 1; }
+              echo "vgate: verified, approved by a reviewer" ;;
+            *) echo "::error::vgate decided: ${DECISION:-no decision} (see the pull request comment)"; exit 1 ;;
+          esac
+
+  automerge:
+    needs: [decide]
+    if: >-
+      always() && github.event_name == 'pull_request' && needs.decide.result == 'success'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Auto-merge
+        env:
+          # A merge made with the workflow token starts no further workflows (no push run on the default branch). If
+          # deploys hang off that push, store a GitHub App or fine-grained token as VGATE_MERGE_TOKEN.
+          GH_TOKEN: ${{ secrets.VGATE_MERGE_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          DECISION: ${{ needs.decide.outputs.decision }}
+        run: |
+          case "$VGATE_MERGE_METHOD" in merge | squash | rebase) ;; *) echo "::error::VGATE_MERGE_METHOD must be merge, squash or rebase"; exit 1 ;; esac
+          if [ "$DECISION" = merge ] && [ "$VGATE_AUTOMERGE" = true ]; then
+            gh pr merge "$PR" --repo "$REPO" --auto "--$VGATE_MERGE_METHOD"
+            echo "Auto-merge on: GitHub merges once the required checks pass."
+          else
+            # A later push that is no longer `merge` must not ride on an earlier push's auto-merge.
+            gh pr merge "$PR" --repo "$REPO" --disable-auto >/dev/null 2>&1 || true
+            echo "No auto-merge (decision: ${DECISION:-none}, VGATE_AUTOMERGE=$VGATE_AUTOMERGE)."
+          fi

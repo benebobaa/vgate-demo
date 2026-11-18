@@ -1,0 +1,6 @@
+# vgate: generated on every run, from the runtime
+regression/node_modules
+regression/tsconfig.json
+regression/package.json
+regression/*/generated/
+reports/
