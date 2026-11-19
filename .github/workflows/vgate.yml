@@ -173,6 +173,20 @@ jobs:
         env:
           BASE: ${{ needs.plan.outputs.base }}
         run: vgate migrations --service "$SERVICE" --base "$BASE"
+      - name: Mutation score
+        # Do the tests catch bugs in the lines this change wrote? Only when vgate.yaml sets policy.mutationScore (it
+        # costs a rebuild per mutant); without the policy decide shows no score and requires none. The key in any YAML
+        # style counts (a flow mapping, quoted): a policy the grep missed would leave every pull request unmeasured.
+        if: always() && needs.plan.outputs.base != ''
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        env:
+          BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          if grep -Eq '^[^#]*mutationScore['\''"]?[[:space:]]*:' vgate.yaml; then
+            vgate mutate --service "$SERVICE" --base "$BASE" || true
+          else
+            echo "policy.mutationScore is not set in vgate.yaml: no mutation run"
+          fi
       - name: Collect the evidence
         if: always()
         working-directory: ${{ env.VGATE_PROJECT_DIR }}
@@ -182,6 +196,7 @@ jobs:
           cp "$VGATE_REPORTS_DIR/verdict.json" "$RUNNER_TEMP/evidence/$SERVICE/verdict.json" 2>/dev/null \
             || echo "::warning::no verdict for $SERVICE: the gate did not finish"
           cp "$VGATE_REPORTS_DIR/migrations.json" "$RUNNER_TEMP/evidence/$SERVICE/migrations.json" 2>/dev/null || true
+          cp "$VGATE_REPORTS_DIR/mutation.json" "$RUNNER_TEMP/evidence/$SERVICE/mutation.json" 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         if: always()
         with:
