@@ -149,12 +149,30 @@ jobs:
         run: |
           corepack enable pnpm
           pipx install uv
+      - name: Is it a UI service?
+        id: kind
+        working-directory: ${{ env.VGATE_PROJECT_DIR }}
+        run: |
+          dir=$(vgate services --json | jq -r '.data.servicesDir')
+          if grep -qE '^ui:' "$dir/$SERVICE/service.yaml" 2>/dev/null; then echo "ui=true" >>"$GITHUB_OUTPUT"; fi
+      # A UI service drives a real Chromium (docs/frontend.md): cache it per vgate version; doctor --fix installs it.
+      - uses: actions/cache@v4
+        if: steps.kind.outputs.ui == 'true'
+        with:
+          path: ~/.cache/ms-playwright
+          key: chromium-${{ needs.plan.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
       - name: Doctor
         working-directory: ${{ env.VGATE_PROJECT_DIR }}
         run: |
           # A pull request can commit a reports/verdict.json: it must never be collected as this run's evidence.
           rm -rf "$VGATE_REPORTS_DIR"
           vgate doctor --service "$SERVICE" --fix
+      - name: Browser system libraries
+        if: steps.kind.outputs.ui == 'true'
+        run: |
+          # The libraries Chromium needs on Linux, through the runtime's own Playwright (the version vgate pins).
+          runtime=$(find "$HOME/.cache/vgate" -maxdepth 2 -type d -name runtime | head -1)
+          sudo "$runtime/node_modules/.bin/playwright" install-deps chromium
       - name: Start the stack
         working-directory: ${{ env.VGATE_PROJECT_DIR }}
         run: vgate up --service "$SERVICE"
@@ -202,6 +220,14 @@ jobs:
         with:
           name: vgate-evidence-gate-${{ matrix.service }}
           path: ${{ runner.temp }}/evidence/
+          retention-days: 14
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        # A UI service's failed screenshots: the expected, actual and diff images side by side.
+        if: always() && steps.kind.outputs.ui == 'true'
+        with:
+          name: vgate-screenshots-${{ matrix.service }}
+          path: ${{ env.VGATE_PROJECT_DIR }}/${{ env.VGATE_REPORTS_DIR }}/test-results/**/*.png
           retention-days: 14
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
